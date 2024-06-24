@@ -1,34 +1,106 @@
 name: Release
 
+permissions:
+  contents: write
+
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*"
 
 jobs:
   release:
-    name: release ${{ matrix.target }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    name: Build on ${{ matrix.platform.os }} with rust to target ${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: x86_64-pc-windows-gnu
-            archive: zip
+        platform:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-20.04
           - target: x86_64-unknown-linux-musl
-            archive: tar.gz tar.xz tar.zst
+            os: ubuntu-20.04
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
           - target: x86_64-apple-darwin
-            archive: zip
+            os: macos-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-20.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-20.04
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
           - target: aarch64-apple-darwin
-            archive: zip
+            os: macos-latest
     steps:
-      - uses: actions/checkout@master
-      - name: Compile and release
-        uses: rust-build/rust-build.action@v1.4.3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure - Basics
+        id: configure
+        run: |
+          git config --global user.email "jdoe@example.com"
+          git config --global user.name "Y. Chen"
+          if [[ "${{ matrix.platform.target }}" == *musl* ]]; then
+            echo "FLAGS=--features reqwest/native-tls-vendored" >> $GITHUB_OUTPUT
+          else
+            echo "FLAGS=" >> $GITHUB_OUTPUT
+          fi
+
+      - name : Configure - Dependencies - Ubuntu
+        run: sudo apt-get update --yes && sudo apt-get install --yes libssl-dev
+        if: contains(matrix.platform.os, 'ubuntu')
+
+      - name: Configure - Dependencies - musl
+        run: sudo apt-get update --yes && sudo apt-get install --yes musl-tools
+        if: contains(matrix.platform.target, 'musl')
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        uses: houseabsolute/actions-rust-cross@v0
         with:
-          RUSTTARGET: ${{ matrix.target }}
-          ARCHIVE_TYPES: ${{ matrix.archive }}
-          TOOLCHAIN_VERSION: nightly
+          command: "build"
+          target: ${{ matrix.platform.target }}
+          toolchain: "stable"
+          args: "--locked --release ${{ steps.configure.outputs.FLAGS }}"
+
+      # - name: Run tests
+      #  uses: houseabsolute/actions-rust-cross@v0
+      #  with:
+      #    command: "test"
+      #    target: ${{ matrix.platform.target }}
+      #    toolchain: ${{ matrix.toolchain }}
+      #    args: "--locked --release"
+      #  if: ${{ !matrix.platform.skip_tests }}
+
+      - name: Archive
+        id: packaging
+        shell: bash
+        run: |
+          cd target/${{ matrix.platform.target }}/release
+          if [[ "${{ matrix.platform.target }}" == *windows* ]]; then
+            artifact=imgcat-${{ matrix.platform.target }}.${{  github.ref_name }}.zip
+            7z a ../../../$artifact imgcat.exe
+          else
+            artifact=imgcat-${{ matrix.platform.target }}.${{  github.ref_name }}.tar.gz
+            tar czvf ../../../$artifact imgcat
+          fi
+          echo "ARTIFACT=$artifact" >> $GITHUB_OUTPUT
+          cd -
+
+      - name: Generate SHA-256
+        shell: bash
+        run: |
+          artifact=${{ steps.packaging.outputs.ARTIFACT }}
+          echo "artifact=$artifact"
+          shasum -a 256 "$artifact" | cut -d' ' -f1 > "$artifact".sha256
+
+      - name: Publish
+        uses: svenstaro/upload-release-action@v2
+        with:
+            repo_token: ${{ secrets.GITHUB_TOKEN }}
+            file: ${{ steps.packaging.outputs.ARTIFACT }}*
+            overwrite: true
+            file_glob: true
