@@ -5,9 +5,11 @@ use anyhow;
 use anyhow::Context;
 use base64::Engine;
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE};
-// noinspection RsUnusedImport
 use clap::{Parser, Args, ArgAction, arg};
 use reqwest;
+use url;
+use pathsep::path_separator;
+
 
 /// Display images inline in terminals support iTerm2's Inline Images Protocol
 ///
@@ -87,38 +89,37 @@ fn print_osc() {
 
 fn print_image(
     image: &[u8],
-    filename: Option<&str>,
-    width: &Option<String>,
-    height: &Option<String>,
-    preserve_aspect_ratio: bool,
-    file_type: &Option<String>,
+    info: (Option<String>, Option<&str>),
+    args: &Cli,
 ) {
     print_osc();
     print!("1337;File=inline=1;size={}", image.len());
 
-    if let Some(name) = filename {
+    if let Some(name) = &info.0 {
         print!(";name={}", BASE64_URL_SAFE.encode(name));
     }
 
-    if let Some(w) = width {
+    if let Some(w) = &args.width {
         print!(";width={w}");
     }
 
-    if let Some(h) = height {
+    if let Some(h) = &args.height {
         print!(";height={h}");
     }
 
-    print!(";preserveAspectRatio={}", preserve_aspect_ratio as u8);
+    print!(";preserveAspectRatio={}", args.preserve_aspect_ratio as u8);
 
-    if let Some(ft) = file_type {
+    if let Some(ft) = &args.file_type {
         print!(";type={ft}");
     }
     print!(":{}", BASE64_STANDARD.encode(image));
     print_st();
 
     println!();
-    if let Some(name) = filename {
-        println!("{name}");
+    if args.print_filename {
+        if let Some(name) = &info.1 {
+            println!("{name}");
+        }
     }
 }
 
@@ -162,13 +163,26 @@ fn read_image(input: &Input) -> anyhow::Result<Vec<u8>> {
     })
 }
 
-fn get_filename(input: &Input) -> Option<&str> {
+fn get_file_info(input: &Input) -> (Option<String>, Option<&str>) {
     if let Some(f) = &input.file {
-        Some(f.as_str())
+        let filename = f.rsplitn(2, path_separator!())
+            .next()
+            .map(|x| x.to_string());
+        (filename, Some(f.as_str()))
     } else if let Some(url) = &input.url {
-        Some(url.as_str())
+        let filename = match url::Url::parse(url) {
+            Ok(x) => {
+                x.path()
+                    .trim_end_matches('/')
+                    .rsplitn(2, '/')
+                    .next()
+                    .map(|x| x.to_string())
+            },
+            Err(_) => None
+        };
+        (filename, Some(url.as_str()))
     } else {
-        None
+        (None, None)
     }
 }
 
@@ -176,8 +190,7 @@ fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     let image = read_image(&args.input)
         .with_context(|| "read image data failed")?;
-    let filename = get_filename(&args.input);
-    print_image(&image, filename, &args.width, &args.height,
-                args.preserve_aspect_ratio, &args.file_type);
+    let info = get_file_info(&args.input);
+    print_image(&image, info, &args);
     Ok(())
 }

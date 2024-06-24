@@ -492,7 +492,10 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "pathsep",
+ "percent-encoding",
  "reqwest",
+ "url",
 ]
 
 [[package]]
@@ -657,6 +660,12 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
+
+[[package]]
+name = "pathsep"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa223c370cb326ed75922e69aef96c669a2021545115bfa9778bb640ea575499"
 
 [[package]]
 name = "percent-encoding"
