@@ -9,5 +9,6 @@ base64 = "0.22.1"
 clap = { version = "4.5.7", features = ["derive"] }
 pathsep = "0.1.1"
 percent-encoding = "2.3.1"
+phf = { version = "0.11.2", features = ["macros"] }
 reqwest = { version = "0.12.5", features = ["blocking"] }
 url = "2.5.2"

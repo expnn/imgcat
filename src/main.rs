@@ -5,11 +5,15 @@ use anyhow;
 use anyhow::Context;
 use base64::Engine;
 use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE};
-use clap::{Parser, Args, ArgAction, arg};
+use clap::{Parser, ArgAction, arg};
 use reqwest;
-use url;
+use url::Url;
 use pathsep::path_separator;
+use phf::{phf_set, Set};
 
+const SUPPORTED_SCHEMES: Set<&'static str> = phf_set!{
+     "http", "https", "ftp",
+};
 
 /// Display images inline in terminals support iTerm2's Inline Images Protocol
 ///
@@ -22,23 +26,20 @@ use pathsep::path_separator;
 ///     auto   the image's inherent size will be used to determine an appropriate dimension
 ///
 /// If a type is provided, it is used as a hint to disambiguate."
-/// The file type can be a mime type like text/markdown, a language name like Java, or a file extension like .c"
+/// The file type can be a mime type like text/markdown, a language name like Java, or a file extension like .c
 /// The file type can usually be inferred from the extension or its contents. -t is most useful when"
 /// a filename is not available, such as whe input comes from a pipe."
 ///
 /// Examples:
 ///
-/// $ imgcat -W 250px -H 250px -s avatar.png
-/// $ cat graph.png | imgcat -W 100%
-/// $ imgcat -p -W 500px -u http://host.tld/path/to/image.jpg -W 80 -f image.png
-/// $ cat url_list.txt | xargs imgcat -p -W 40 -u
-/// $ imgcat -t application/json config.json
+///     $ imgcat -W 250px -H 250px -s avatar.png
+///     $ cat graph.png | imgcat -W 100%
+///     $ imgcat -p -W 500px -u http://host.tld/path/to/image.jpg -W 80 -f image.png
+///     $ cat url_list.txt | xargs imgcat -p -W 40 -u
+///     $ imgcat -t application/json config.json
 #[derive(Parser, Debug)]
 #[command(version, about, long_about, verbatim_doc_comment)]
 struct Cli {
-    #[command(flatten)]
-    input: Input,
-
     #[arg(short='t', long)]
     file_type: Option<String>,
 
@@ -54,25 +55,71 @@ struct Cli {
     #[arg(short='s', long="stretch", action=ArgAction::SetFalse, default_value_t = true)]
     preserve_aspect_ratio: bool,
 
-    /// whether to print the filename of the image or not
+    /// whether to print the path or URL of the image or not
     #[arg(short, long)]
-    print_filename: bool,
+    print_path: bool,
+
+    /// input image files or URLs to show. Read from stdin if not given
+    #[arg(num_args = 0..)]
+    inputs: Vec<String>
 }
 
-#[derive(Args, Debug)]
-#[group(required = false, multiple = false)]
-struct Input {
-    // /// read input from Stdin
-    // #[arg(long)]
-    // stdin: bool,
+struct Image<'a> {
+    data: Vec<u8>,
+    filename: Option<String>,
+    path: Option<&'a str>,
+}
 
-    /// read input image from URL
-    #[arg(short, long)]
-    url: Option<String>,
+impl<'a> Image<'a> {
+    fn try_new(path: &'a str) -> anyhow::Result<Self> {
+        // 由于在 Windows 中， 类似 C:/a/b/c 这样的绝对路径可以被 Url::parse 函数正确解析。
+        // 这里限定 scheme 为给定集合中的值时，才认为他是一个图片的 URL。
+        if let Ok(u) = Url::parse(path) {
+            if SUPPORTED_SCHEMES.contains(u.scheme()) {
+                let filename = u.path()
+                    .trim_end_matches('/')
+                    .rsplitn(2, '/')
+                    .next()
+                    .map(|x| x.to_string());
+                let data = reqwest::blocking::get(u)
+                    .with_context(|| format!("failed to connect to {path}"))?
+                    .bytes()
+                    .with_context(|| format!("failed to fetch image data from {path}"))?
+                    .iter()
+                    .cloned()
+                    .collect();
+                return Ok(Self {data, filename, path: Some(path)});
+            }
+        }
 
-    /// read input image from local file
-    #[arg(short, long)]
-    file: Option<String>,
+        // 其余情况，包括 Url 解析出错，或者解析得到的 scheme 不在给定的集合中，
+        // 则回退到认为给定的 path 是一个本地文件系统的路径。
+        let f = path.trim_start_matches("file://");
+        let filename = f.rsplitn(2, path_separator!())
+            .next()
+            .map(|x| x.to_string());
+        let mut file = File::open(path)
+            .with_context(|| format!("failed to open file {f}"))?;
+        let metadata = fs::metadata(&f);
+        let mut buffer = match metadata {
+            Ok(m) => {vec![0; m.len() as usize]}
+            Err(_) => {Vec::new()}
+        };
+        file.read(&mut buffer)
+            .with_context(|| format!("failed to read from file {f}"))?;
+        Ok(Self {data: buffer, filename, path: Some(path)})
+    }
+
+    fn from_stdin() -> anyhow::Result<Self> {
+        let mut data = Vec::new();
+        io::stdin().read_to_end(&mut data)
+            .with_context(|| "failed to read stdin")?;
+        Ok(Self {data, filename: None, path: None})
+    }
+
+    fn len(&self) -> usize {
+        self.data.len()
+    }
 }
 
 fn print_osc() {
@@ -88,14 +135,13 @@ fn print_osc() {
 }
 
 fn print_image(
-    image: &[u8],
-    info: (Option<String>, Option<&str>),
+    image: Image,
     args: &Cli,
 ) {
     print_osc();
     print!("1337;File=inline=1;size={}", image.len());
 
-    if let Some(name) = &info.0 {
+    if let Some(name) = &image.filename {
         print!(";name={}", BASE64_URL_SAFE.encode(name));
     }
 
@@ -112,12 +158,12 @@ fn print_image(
     if let Some(ft) = &args.file_type {
         print!(";type={ft}");
     }
-    print!(":{}", BASE64_STANDARD.encode(image));
+    print!(":{}", BASE64_STANDARD.encode(&image.data));
     print_st();
 
     println!();
-    if args.print_filename {
-        if let Some(name) = &info.1 {
+    if args.print_path {
+        if let Some(name) = &image.path {
             println!("{name}");
         }
     }
@@ -135,62 +181,19 @@ fn print_st() {
     }
 }
 
-fn read_image(input: &Input) -> anyhow::Result<Vec<u8>> {
-    Ok(if let Some(f) = &input.file {
-        let mut file = File::open(f)
-            .with_context(|| format!("failed to open file {f}"))?;
-        let metadata = fs::metadata(&f);
-        let mut buffer = match metadata {
-            Ok(m) => {vec![0; m.len() as usize]}
-            Err(_) => {Vec::new()}
-        };
-        file.read(&mut buffer)
-            .with_context(|| format!("failed to read from file {f}"))?;
-        buffer
-    } else if let Some(url) = &input.url {
-        reqwest::blocking::get(url)
-            .with_context(|| format!("failed to connect to {url}"))?
-            .bytes()
-            .with_context(|| format!("failed to fetch image data from {url}"))?
-            .iter()
-            .cloned()
-            .collect()
-    } else {
-        let mut buffer = Vec::new();
-        io::stdin().read_to_end(&mut buffer)
-            .with_context(|| "failed to read stdin")?;
-        buffer
-    })
-}
-
-fn get_file_info(input: &Input) -> (Option<String>, Option<&str>) {
-    if let Some(f) = &input.file {
-        let filename = f.rsplitn(2, path_separator!())
-            .next()
-            .map(|x| x.to_string());
-        (filename, Some(f.as_str()))
-    } else if let Some(url) = &input.url {
-        let filename = match url::Url::parse(url) {
-            Ok(x) => {
-                x.path()
-                    .trim_end_matches('/')
-                    .rsplitn(2, '/')
-                    .next()
-                    .map(|x| x.to_string())
-            },
-            Err(_) => None
-        };
-        (filename, Some(url.as_str()))
-    } else {
-        (None, None)
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
-    let image = read_image(&args.input)
-        .with_context(|| "read image data failed")?;
-    let info = get_file_info(&args.input);
-    print_image(&image, info, &args);
+    println!("got {} input images", args.inputs.len());
+    if args.inputs.is_empty() {
+        let image = Image::from_stdin()?;
+        print_image(image, &args);
+    } else {
+        args.inputs
+            .iter()
+            .try_for_each(|x| -> anyhow::Result<()> {
+                print_image(Image::try_new(x)?, &args);
+                Ok(())
+            })?;
+    }
     Ok(())
 }
