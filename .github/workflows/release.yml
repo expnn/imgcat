@@ -37,34 +37,49 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure - Basics
-        id: configure
         run: |
-          git config --global user.email "jdoe@example.com"
-          git config --global user.name "Y. Chen"
-          if [[ "${{ matrix.platform.target }}" == *musl* ]]; then
-            echo "FLAGS=--features reqwest/native-tls-vendored" >> $GITHUB_OUTPUT
+          git config --global user.email "chenych11@gmail.com"
+          git config --global user.name "cyc"
+
+      - name: Configure - Unix-like
+        run: |
+          if [[ "${{ matrix.platform.target }}" == *musl* || "${{ matrix.platform.target }}" == *aarch64* ]]; then
+            echo "FLAGS=--features reqwest/native-tls-vendored" >> $GITHUB_ENV
           else
-            echo "FLAGS=" >> $GITHUB_OUTPUT
+            echo "FLAGS=" >> $GITHUB_ENV
           fi
+        if: ${{ ! contains(matrix.platform.os, 'windows') }}
+
+      - name: Configure - Windows
+        run: echo "FLAGS=--features reqwest/native-tls-vendored" | Out-File -FilePath $env:GITHUB_ENV -Append
+        if: ${{ contains(matrix.platform.os, 'windows') }}
 
       - name : Configure - Dependencies - Ubuntu
         run: sudo apt-get update --yes && sudo apt-get install --yes libssl-dev
-        if: contains(matrix.platform.os, 'ubuntu')
+        if: ${{ contains(matrix.platform.os, 'ubuntu') }}
 
       - name: Configure - Dependencies - musl
         run: sudo apt-get update --yes && sudo apt-get install --yes musl-tools
-        if: contains(matrix.platform.target, 'musl')
+        if: ${{ contains(matrix.platform.target, 'musl') }}
+
+      - name: Show env on Unix-like system
+        run: echo FLAGS = $FLAGS
+        if: ${{ ! contains(matrix.platform.os, 'windows') }}
+
+      - name: Show env on Windows
+        run: echo FLAGS = $env:FLAGS
+        if: ${{ contains(matrix.platform.os, 'windows') }}
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build
+      - name: Build ${{ matrix.platform.target }}
         uses: houseabsolute/actions-rust-cross@v0
         with:
           command: "build"
           target: ${{ matrix.platform.target }}
           toolchain: "stable"
-          args: "--locked --release ${{ steps.configure.outputs.FLAGS }}"
+          args: "--locked --release $FLAGS"
 
       # - name: Run tests
       #  uses: houseabsolute/actions-rust-cross@v0
@@ -96,6 +111,14 @@ jobs:
           artifact=${{ steps.packaging.outputs.ARTIFACT }}
           echo "artifact=$artifact"
           shasum -a 256 "$artifact" | cut -d' ' -f1 > "$artifact".sha256
+        if: ${{ !contains(matrix.platform.os, 'windows') }}
+
+      - name: Generate SHA-256 on Windows
+        shell: powershell
+        run: |
+          (certutil -hashfile ${{ steps.packaging.outputs.ARTIFACT }} SHA256)[1] | `
+           Out-File -Encoding ASCII ${{ steps.packaging.outputs.ARTIFACT }}.sha256
+        if: ${{ contains(matrix.platform.os, 'windows') }}
 
       - name: Publish
         uses: svenstaro/upload-release-action@v2
