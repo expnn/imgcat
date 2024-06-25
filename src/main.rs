@@ -183,7 +183,6 @@ fn print_st() {
 
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
-    println!("got {} input images", args.inputs.len());
     if args.inputs.is_empty() {
         let image = Image::from_stdin()?;
         print_image(image, &args);
